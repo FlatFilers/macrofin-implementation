@@ -1,90 +1,91 @@
-import { recordHook, FlatfileRecord } from "@flatfile/plugin-record-hook";
-import { FlatfileEvent, Client } from "@flatfile/listener";
+import { FlatfileListener } from "@flatfile/listener";
 import api from "@flatfile/api";
-import axios from "axios";
+import { blueprint } from './blueprint/blueprint'
+import { blueprintVendors } from './blueprint/blueprint_vendors'
+import { blueprintOpenAR } from './blueprint/blueprint_open_ar'
+import { blueprintOpenAP } from './blueprint/blueprint_open_ap'
+import { createPage } from './workflow/welcome-page'
+import { xlsxExtractorPlugin } from "@flatfile/plugin-xlsx-extractor";
+import { metadata } from "./partials/metadata";
+// import { recordHook } from '@flatfile/plugin-record-hook'
 
-export default function flatfileEventListener(listener: Client) {
-  listener.on("**", ({ topic }: FlatfileEvent) => {
-    console.log(`Received event: ${topic}`);
-  });
 
-  listener.use(
-    recordHook("contacts", (record: FlatfileRecord) => {
-      const value = record.get("firstName");
-      if (typeof value === "string") {
-        record.set("firstName", value.toLowerCase());
-      }
+// import { configSheetHooks } from "./sheets/configureSheet";
+// import { dataInReviewListener } from "./sheets/dataForReviewSheet";
+// import { spaceConfigureJob } from "./src/jobs/space.configure";
+// import { inviteCollaboratorsJob } from "./src/jobs/invite.collaborators";
 
-      const email = record.get("email") as string;
-      const validEmailAddress = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!validEmailAddress.test(email)) {
-        console.log("Invalid email address");
-        record.addError("email", "Invalid email address");
-      }
+export default function (listener: FlatfileListener) {
+    
+    listener.filter({ job: 'space:configure' }, (configure) => {
+        // Add an event listener for the 'job:created' event with a filter on 'space:configure'
+        configure.on('job:ready', async (event) => {
+            // Destructure the 'context' object from the event object to get the necessary IDs
+            const { spaceId, environmentId, jobId } = event.context
+            const space = await api.spaces.get(spaceId)
+            
+      
+            await api.jobs.ack(jobId, { info: "Configuring space...", progress: 10 });
+      
+            // ADD CUSTOM MARKDOWN PAGE TO SPACE
+            const page = await createPage(spaceId)
 
-      return record;
-    })
-  );
-
-  listener.filter({ job: "workbook:submitAction" }, (configure) => {
-    configure.on(
-      "job:ready",
-      async ({ context: { jobId, workbookId }, payload }: FlatfileEvent) => {
-        const { data: sheets } = await api.sheets.list({ workbookId });
-
-        const records: { [name: string]: any } = {};
-        for (const [index, element] of sheets.entries()) {
-          records[`Sheet[${index}]`] = await api.records.get(element.id);
-        }
-
-        try {
-          await api.jobs.ack(jobId, {
-            info: "Starting job to submit action to webhook.site",
-            progress: 10,
-          });
-
-          console.log(JSON.stringify(records, null, 2));
-
-          const webhookReceiver =
-            process.env.WEBHOOK_SITE_URL ||
-            "https://webhook.site/c83648d4-bf0c-4bb1-acb7-9c170dad4388";
-
-          const response = await axios.post(
-            webhookReceiver,
-            {
-              ...payload,
-              method: "axios",
-              sheets,
-              records,
-            },
-            {
-              headers: {
-                "Content-Type": "application/json",
-              },
-            }
-          );
-
-          if (response.status === 200) {
-            await api.jobs.complete(jobId, {
-              outcome: {
-                message:
-                  "Data was successfully submitted to webhook.site. Go check it out!",
-              },
+            const { data: workbook } = await api.workbooks.create({
+              spaceId,
+              environmentId,
+              name: "Customers",
+              labels: ["primary"],
+              sheets: blueprint,
             });
-          } else {
-            throw new Error("Failed to submit data to webhook.site");
-          }
-        } catch (error) {
-          console.log(`webhook.site[error]: ${JSON.stringify(error, null, 2)}`);
 
-          await api.jobs.fail(jobId, {
-            outcome: {
-              message:
-                "This job failed probably because it couldn't find the webhook.site URL.",
-            },
-          });
-        }
-      }
-    );
-  });
+            
+      
+            await api.spaces.update(spaceId, {
+              environmentId,
+              metadata,
+              primaryWorkbookId: workbook.id,
+            });
+
+            const workbookVendors = await api.workbooks.create({
+                spaceId,
+                environmentId,
+                name: "Vendors",
+                sheets: blueprintVendors,
+              });
+
+            const workbookOpenAP = await api.workbooks.create({
+              spaceId,
+              environmentId,
+              name: "Open AP",
+              sheets: blueprintOpenAP,
+            });
+            
+            const workbookOpenAR = await api.workbooks.create({
+              spaceId,
+              environmentId,
+              name: "Open AR",
+              sheets: blueprintOpenAR,
+            });
+
+            
+            await api.jobs.complete(jobId, {});
+          }) 
+      });
+      
+
+//   /**
+//    * implement direct job handlers
+//    */
+//   listener.use(spaceConfigureJob);
+//   listener.use(inviteCollaboratorsJob);
+
+//   /**
+//    * Config Sheet Hooks
+//    */
+//   listener.use(configSheetHooks);
+  
+//   /**
+//    *   This adds XLSX Parsing to the Space
+//    */
+//   listener.use(xlsxExtractorPlugin({ rawNumbers: true }));
 }
